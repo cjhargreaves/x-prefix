@@ -1,3 +1,5 @@
 gateway/target
 gateway/.env
 .claude/
+x-api-test/target
+x-api-test/.env
