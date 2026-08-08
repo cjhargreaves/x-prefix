@@ -1,23 +1,60 @@
 # X-Prefix
 
-Grok's API caches repeated prompt prefixes — identical leading text = cheaper,
-faster requests. We make that happen on purpose instead of by accident.
+Force Grok prefix-cache hits using live X data.
 
-**How:** when a user asks about a trending topic, we pull real X data on it,
-compress it into a dense context block, and prepend it as a system message
-*before* the request hits Grok. Every user asking about the same topic gets
-the same prefix, so Grok's cache actually reuses it.
+## The problem
 
-**Why X:** it's the source of the live, real-time info Grok already leans on —
-we're doing that fetch-and-shape ourselves, upfront, so Grok gets curated
-signal instead of raw noise.
+Grok caches repeated prompt prefixes. Identical leading text = cheaper, faster.
 
-**What we're proving:**
-- Lower time-to-first-token on cached vs. raw requests
-- Lower input token usage (curated context vs. raw dump)
-- Real cache hits — `cached_tokens` in Grok's response going from 0 to
-  non-zero across "different" users on the same topic
+But it only happens by accident, when two users phrase things the same way.
 
-**Demo:** same trending topic, two requests. First one pays full price/latency.
-Second rides the shared prefix — faster, cheaper, non-zero cache hit, straight
-from the API.
+Different phrasing, same topic:
+
+```
+User A: "what's going on with the Nvidia crash?"
+User B: "explain the NVDA drop"
+         ^ different bytes, no shared prefix, no cache hit
+```
+
+## The fix
+
+Put the same block in front of both.
+
+```
+1. User asks about a trending topic
+2. We pull live X data on it
+3. Compress into a fixed context block
+4. Prepend as a system message
+5. Send to Grok
+```
+
+Now both requests start with identical bytes. Cache hits.
+
+## Why X
+
+X is the live signal Grok already leans on.
+
+We fetch and shape it ourselves, upfront, so Grok gets curated data instead of raw noise.
+
+## What we're proving
+
+| Metric | Claim |
+|---|---|
+| TTFT | Lower on cached vs. raw requests |
+| Input tokens | Lower (curated context, not a raw dump) |
+| `cached_tokens` | Goes 0 to non-zero across users on the same topic |
+
+That last one is the real proof. It's a number the API hands back, not something we estimate.
+
+## Demo
+
+Two requests, same trending topic, two "users."
+
+- **First:** full price, full latency
+- **Second:** rides the shared prefix. Faster, cheaper, non-zero cache hit
+
+## Stack
+
+- Rust gateway (Axum) sitting in front of `api.x.ai`
+- X API for trends and posts
+- No GPU. xAI hosts the inference.
