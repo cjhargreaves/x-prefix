@@ -37,8 +37,6 @@ impl Allocator {
         *self.trends.write().unwrap() = built;
     }
 
-    /// Exact lookup by trend key. Callers name the trend they want via
-    /// `x-trend` — the gateway never infers topic from message text.
     pub fn get(&self, key: &str) -> Option<Arc<Trend>> {
         self.trends.read().unwrap().get(key).cloned()
     }

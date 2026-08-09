@@ -1,4 +1,4 @@
-//! Posts → the byte-stable prefix block injected into requests.
+//! Builds a trend's context block from its posts.
 
 use clients::x::Post;
 use std::collections::hash_map::DefaultHasher;

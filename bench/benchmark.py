@@ -1,4 +1,4 @@
-"""N users per arm loop varied prompts for a duration, three cases side by
+"""N users per case loop varied prompts for a duration, three cases side by
 side: direct, unshared context, shared context through the gateway.
 
 Usage:
