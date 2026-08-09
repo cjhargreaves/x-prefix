@@ -3,7 +3,8 @@
 Inference optimization experimentation by injecting live X trending data and posts as shared, cacheable prompt prefixes.
 
 The question: if you put the same live X data in front of every request about
-a trending topic, does Grok's KV cache actually reuse it?
+a trending topic, does Grok's KV cache actually reuse it, and do the requests
+that follow the first one come out ahead because of it?
 
 ## The idea
 
