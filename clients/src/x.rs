@@ -8,10 +8,6 @@ const SEARCH: &str = "https://api.twitter.com/2/tweets/search/recent";
 pub const WORLDWIDE: u32 = 1;
 pub const UNITED_STATES: u32 = 23424977;
 
-pub struct Trend {
-    pub name: String,
-}
-
 pub struct Post {
     pub id: String,
     pub text: String,
@@ -21,7 +17,7 @@ pub struct Post {
     pub impressions: u64,
 }
 
-pub async fn trends(client: &reqwest::Client, bearer: &str, woeid: u32) -> Vec<Trend> {
+pub async fn trends(client: &reqwest::Client, bearer: &str, woeid: u32) -> Vec<String> {
     let body: TrendsBody = client
         .get(format!("{TRENDS}/{woeid}"))
         .bearer_auth(bearer)
@@ -32,10 +28,7 @@ pub async fn trends(client: &reqwest::Client, bearer: &str, woeid: u32) -> Vec<T
         .await
         .unwrap();
 
-    body.data
-        .into_iter()
-        .map(|t| Trend { name: t.trend_name })
-        .collect()
+    body.data.into_iter().map(|t| t.trend_name).collect()
 }
 
 pub async fn posts(client: &reqwest::Client, bearer: &str, query: &str, limit: usize) -> Vec<Post> {

@@ -1,14 +1,12 @@
 # X-Prefix
 
-Force Grok prefix-cache hits using live X data.
+Inference cost optimization by injecting live X trending data and posts as shared, cacheable prompt prefixes.
 
 ## The problem
 
-Grok caches repeated prompt prefixes. Identical leading text = cheaper, faster.
+Grok caches repeated prompt prefixes. Identical leading text bills at the cached rate.
 
 But it only happens by accident, when two users phrase things the same way.
-
-Different phrasing, same topic:
 
 ```
 User A: "what's going on with the Nvidia crash?"
@@ -28,33 +26,73 @@ Put the same block in front of both.
 5. Send to Grok
 ```
 
-Now both requests start with identical bytes. Cache hits.
+Now both requests start with identical bytes. Cache hits. Answers come grounded
+in what's actually on X right now instead of the model guessing.
 
-## Why X
+## Results
 
-X is the live signal Grok already leans on.
+20 concurrent users, 60s per run. The honest control is `unshared`: the same
+context block, perturbed at the first byte per user so it can never share.
+Same prompt size, same model work, the only difference is sharing.
 
-We fetch and shape it ourselves, upfront, so Grok gets curated data instead of raw noise.
+| context size | unshared cost | gateway cost | saved | cached share |
+|---|---|---|---|---|
+| ~660 tokens (8 posts) | 18.3M ticks | 14.5M ticks | **21%** | 96% |
+| ~1610 tokens (20 posts) | 29.3M ticks | 16.3M ticks | **44%** | 94% |
 
-## What we're proving
-
-| Metric | Claim |
-|---|---|
-| TTFT | Lower on cached vs. raw requests |
-| Input tokens | Lower (curated context, not a raw dump) |
-| `cached_tokens` | Goes 0 to non-zero across users on the same topic |
-
-That last one is the real proof. It's a number the API hands back, not something we estimate.
-
-## Demo
-
-Two requests, same trending topic, two "users."
-
-- **First:** full price, full latency
-- **Second:** rides the shared prefix. Faster, cheaper, non-zero cache hit
+The gap widens as context grows: the added tokens are exactly the ones served
+from cache. Latency is a wash (prefill is milliseconds inside a multi-second
+response). Cost numbers are xAI's own billing fields, not estimates.
 
 ## Stack
 
-- Rust gateway (Axum) sitting in front of `api.x.ai`
+- Rust gateway (Axum on Tokio) in front of `api.x.ai`
 - X API for trends and posts
 - No GPU. xAI hosts the inference.
+
+## Layout
+
+```
+clients/   X + xAI API wrappers (clients::x, clients::grok)
+gateway/   the proxy: allocator, prefix builder, injection
+bench/     Python benchmark, targets the running gateway
+```
+
+## Running it
+
+```
+cd gateway && cargo run
+```
+
+Needs `X_BEARER_TOKEN` and `XAI_API_KEY` in `gateway/.env`.
+
+Knobs (env vars):
+
+| var | default | does |
+|---|---|---|
+| `TREND_COUNT` | 5 | trends fetched and held |
+| `POSTS_PER_TREND` | 8 | posts per context block (controls prefix size) |
+| `REFRESH_INTERVAL_SECS` | 300 | background rebuild interval |
+
+Endpoints:
+
+```
+GET  /trends                     → currently active trends
+GET  /trends/{name}              → that trend's prefix block
+POST /v1/chat/completions        → normal OpenAI-shaped chat body
+  header x-trend: <name>         → exact match against /trends; injects that
+                                    trend's prefix + pins conv-id by topic.
+                                    Omit for plain passthrough.
+```
+
+Smoke test: `cargo run --bin run-test -- "prompt" [trend name]`
+
+## Benchmark
+
+```
+cd bench && .venv/bin/python benchmark.py --users 20 --duration 60
+```
+
+Three arms side by side: `direct` (no context), `unshared` (context, no
+sharing), `gateway` (context, shared). Live dashboard, then a summary with
+TTFT percentiles, cached tokens, and billed cost per arm.

@@ -1,5 +1,8 @@
+import json
 import os
 import time
+import urllib.parse
+import urllib.request
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -8,14 +11,27 @@ load_dotenv()
 
 XAI_URL = "https://api.x.ai/v1"
 GATEWAY_URL = "http://127.0.0.1:3000/v1"
+TRENDS_URL = "http://127.0.0.1:3000/trends"
 
 
 def direct():
     return OpenAI(api_key=os.environ["XAI_API_KEY"], base_url=XAI_URL)
 
 
-def gateway():
-    return OpenAI(api_key="unused", base_url=GATEWAY_URL)
+def gateway(trend):
+    return OpenAI(
+        api_key="unused",
+        base_url=GATEWAY_URL,
+        default_headers={"x-trend": trend},
+    )
+
+
+def trends():
+    return json.load(urllib.request.urlopen(TRENDS_URL))
+
+
+def trend_prefix(name):
+    return urllib.request.urlopen(f"{TRENDS_URL}/{urllib.parse.quote(name)}").read().decode()
 
 
 def timed(client, model, messages, **kwargs):
@@ -59,3 +75,7 @@ class Sample:
     def cached_tokens(self):
         d = getattr(self.usage, "prompt_tokens_details", None) if self.usage else None
         return getattr(d, "cached_tokens", 0) or 0
+
+    @property
+    def cost_ticks(self):
+        return getattr(self.usage, "cost_in_usd_ticks", 0) if self.usage else 0

@@ -1,21 +1,23 @@
 //! Holds `trend_count` prefix blocks in memory, refreshed from live X data.
 
+use crate::prefix::{self, Trend};
 use clients::x;
-use context::Trend;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 pub struct Allocator {
     bearer: String,
     trend_count: usize,
-    trends: RwLock<HashMap<String, Trend>>,
+    posts_per_trend: usize,
+    trends: RwLock<HashMap<String, Arc<Trend>>>,
 }
 
 impl Allocator {
-    pub fn new(bearer: String, trend_count: usize) -> Self {
+    pub fn new(bearer: String, trend_count: usize, posts_per_trend: usize) -> Self {
         Self {
             bearer,
             trend_count,
+            posts_per_trend,
             trends: RwLock::new(HashMap::new()),
         }
     }
@@ -24,25 +26,25 @@ impl Allocator {
         let top_trends = x::trends(client, &self.bearer, x::UNITED_STATES).await;
 
         let mut built = HashMap::new();
-        for trend in top_trends.into_iter().take(self.trend_count) {
-            let posts = x::posts(client, &self.bearer, &trend.name, 8).await;
+        for name in top_trends.into_iter().take(self.trend_count) {
+            let posts = x::posts(client, &self.bearer, &name, self.posts_per_trend).await;
             if posts.is_empty() {
                 continue;
             }
-            built.insert(trend.name.clone(), context::build(&trend.name, &posts));
+            built.insert(name.clone(), Arc::new(prefix::build(&name, &posts)));
         }
 
         *self.trends.write().unwrap() = built;
     }
 
-    pub fn lookup(&self, user_text: &str) -> Option<Trend> {
-        let haystack = user_text.to_lowercase();
-        self.trends
-            .read()
-            .unwrap()
-            .values()
-            .find(|trend| haystack.contains(&trend.key.to_lowercase()))
-            .cloned()
+    /// Exact lookup by trend key. Callers name the trend they want via
+    /// `x-trend` — the gateway never infers topic from message text.
+    pub fn get(&self, key: &str) -> Option<Arc<Trend>> {
+        self.trends.read().unwrap().get(key).cloned()
+    }
+
+    pub fn keys(&self) -> Vec<String> {
+        self.trends.read().unwrap().keys().cloned().collect()
     }
 
     pub fn active_count(&self) -> usize {

@@ -1,27 +1,23 @@
-//! Posts → the byte-stable prefix block the gateway injects.
+//! Posts → the byte-stable prefix block injected into requests.
 
 use clients::x::Post;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-#[derive(Clone)]
 pub struct Trend {
     pub key: String,
     pub prefix: String,
-}
-
-impl Trend {
-    pub fn conv_id(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        self.key.hash(&mut hasher);
-        format!("trend-{:016x}", hasher.finish())
-    }
+    pub conv_id: String,
 }
 
 pub fn build(key: &str, posts: &[Post]) -> Trend {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+
     Trend {
         key: key.to_string(),
         prefix: format_prefix(key, posts),
+        conv_id: format!("trend-{:016x}", hasher.finish()),
     }
 }
 
