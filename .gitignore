@@ -1,5 +1,5 @@
-gateway/target
-gateway/.env
+target/
+.env
 .claude/
-x-api-test/target
-x-api-test/.env
+bench/.venv
+bench/__pycache__
