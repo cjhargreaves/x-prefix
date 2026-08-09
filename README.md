@@ -104,7 +104,7 @@ POST /v1/chat/completions        OpenAI-shaped chat body
                                  request passes through untouched.
 ```
 
-To check it's working: `cargo run --bin run-test -- "prompt" [trend name]`
+Test: `cargo run --bin run-test -- "prompt" [trend name]`
 
 ## Benchmark
 
