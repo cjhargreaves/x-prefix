@@ -79,3 +79,7 @@ class Sample:
     @property
     def cost_ticks(self):
         return getattr(self.usage, "cost_in_usd_ticks", 0) if self.usage else 0
+
+    @property
+    def completion_tokens(self):
+        return self.usage.completion_tokens if self.usage else 0
