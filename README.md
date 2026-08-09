@@ -1,6 +1,6 @@
 # prefix-x
 
-Inference cost optimization by injecting live X trending data and posts as shared, cacheable prompt prefixes.
+Inference optimization experimentation by injecting live X trending data and posts as shared, cacheable prompt prefixes.
 
 ## The problem
 
