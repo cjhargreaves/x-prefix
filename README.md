@@ -35,16 +35,17 @@ about that topic, send them all to the same server, and see if the cache hits.
 
 ## Measuring it
 
-xAI caches some of its own preamble no matter what you send, so a nonzero
-cached count means nothing by itself. The control arm sends the exact same
-context block but with a different first line for each user. Matching stops
-at the first difference, so everything after that line gets processed at full
-price even though it is identical. Same prompt size, same work for the model,
-the only thing that changes is whether the text is shared.
+Every xAI response reports 130 to 190 cached tokens even when nothing is
+shared, from text xAI adds to requests on their side. So a nonzero cached
+count proves nothing by itself. To isolate the effect, the unshared case
+sends the exact same context block but with a different first line per user.
+Matching stops at the first difference, so everything after that line gets
+processed at full price even though it is identical. Same prompt size, same
+work for the model, the only difference is whether the text is shared.
 
-Three arms, 20 concurrent users each, 60 seconds:
+Three cases, 20 concurrent users each, 60 seconds:
 
-| arm | sends |
+| case | sends |
 |---|---|
 | direct | question only |
 | unshared | context block with a per-user first line, plus question |
@@ -59,8 +60,9 @@ tokens are exactly the ones the cache covers.
 
 Time to first token did not improve. Processing 1500 tokens of prompt takes
 tens of milliseconds inside a response that takes several seconds, and going
-through the proxy adds a little time on top. The reuse is real but it shows
-up on the bill, not the clock, because xAI owns the GPUs that skip the work.
+through the proxy adds a little time on top. The saved work is real, but
+since xAI owns the GPUs, it shows up as their lower cached-token price
+instead of faster responses.
 
 Also, the cache takes a moment after the first request on a topic before it
 starts hitting. A request that comes in right after the first one can miss.
@@ -76,7 +78,7 @@ starts hitting. A request that comes in right after the first one can miss.
 ```
 clients/   X + xAI API wrappers
 gateway/   the proxy, allocator, prefix builder, injection
-bench/     Python harness, three arms against the running gateway
+bench/     Python benchmark, runs the three cases against the gateway
 ```
 
 ## Running it
@@ -102,7 +104,7 @@ POST /v1/chat/completions        OpenAI-shaped chat body
                                  request passes through untouched.
 ```
 
-Smoke test: `cargo run --bin run-test -- "prompt" [trend name]`
+To check it's working: `cargo run --bin run-test -- "prompt" [trend name]`
 
 ## Benchmark
 
