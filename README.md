@@ -1,4 +1,4 @@
-# X-Prefix
+# prefix-x
 
 Inference cost optimization by injecting live X trending data and posts as shared, cacheable prompt prefixes.
 
