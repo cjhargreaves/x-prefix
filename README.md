@@ -2,60 +2,80 @@
 
 Inference optimization experimentation by injecting live X trending data and posts as shared, cacheable prompt prefixes.
 
-## The problem
+The question: if you put the same live X data in front of every request about
+a trending topic, does Grok's KV cache actually reuse it?
 
-Grok caches repeated prompt prefixes. Identical leading text bills at the cached rate.
+## The idea
 
-But it only happens by accident, when two users phrase things the same way.
+When the model reads a prompt, the internal state it builds for each token
+only depends on the tokens before it. So if two requests start with the same
+text, the state for that part is the same, and a server that already has it
+can skip that work and only process the new tokens. xAI reports this in
+`cached_tokens` on every response and bills those tokens at a lower rate.
+
+Across different users this basically never happens on its own. Everyone
+words their question differently, so no two requests start the same, and
+requests get spread across servers that each have their own cache.
+
+So the experiment is to force it. When a topic trends, build one context block
+from its live posts, put the exact same bytes at the front of every request
+about that topic, send them all to the same server, and see if the cache hits.
+
+## How
 
 ```
-User A: "what's going on with the Nvidia crash?"
-User B: "explain the NVDA drop"
-         ^ different bytes, no shared prefix, no cache hit
+1. Pull current trending topics and top posts
+2. Build one fixed context block per trend, nothing in it that
+   changes between requests
+3. Insert it as the first system message on requests naming that trend
+4. Set x-grok-conv-id to a hash of the topic instead of the user,
+   so same-topic requests go to the same server
 ```
 
-## The fix
+## Measuring it
 
-Put the same block in front of both.
+xAI caches some of its own preamble no matter what you send, so a nonzero
+cached count means nothing by itself. The control arm sends the exact same
+context block but with a different first line for each user. Matching stops
+at the first difference, so everything after that line gets processed at full
+price even though it is identical. Same prompt size, same work for the model,
+the only thing that changes is whether the text is shared.
 
-```
-1. User asks about a trending topic
-2. We pull live X data on it
-3. Compress into a fixed context block
-4. Prepend as a system message
-5. Send to Grok
-```
+Three arms, 20 concurrent users each, 60 seconds:
 
-Now both requests start with identical bytes. Cache hits. Answers come grounded
-in what's actually on X right now instead of the model guessing.
+| arm | sends |
+|---|---|
+| direct | question only |
+| unshared | context block with a per-user first line, plus question |
+| gateway | shared context block, plus question |
 
-## Results
+## What came out
 
-20 concurrent users, 60s per run. The honest control is `unshared`: the same
-context block, perturbed at the first byte per user so it can never share.
-Same prompt size, same model work, the only difference is sharing.
+With blocks around 660 tokens the gateway billed 21% less than unshared. At
+around 1600 tokens it was 44% less, with 94 to 96% of prompt tokens coming
+from cache. The bigger the block, the bigger the gap, because the extra
+tokens are exactly the ones the cache covers.
 
-| context size | unshared cost | gateway cost | saved | cached share |
-|---|---|---|---|---|
-| ~660 tokens (8 posts) | 18.3M ticks | 14.5M ticks | **21%** | 96% |
-| ~1610 tokens (20 posts) | 29.3M ticks | 16.3M ticks | **44%** | 94% |
+Time to first token did not improve. Processing 1500 tokens of prompt takes
+tens of milliseconds inside a response that takes several seconds, and going
+through the proxy adds a little time on top. The reuse is real but it shows
+up on the bill, not the clock, because xAI owns the GPUs that skip the work.
 
-The gap widens as context grows: the added tokens are exactly the ones served
-from cache. Latency is a wash (prefill is milliseconds inside a multi-second
-response). Cost numbers are xAI's own billing fields, not estimates.
+Also, the cache takes a moment after the first request on a topic before it
+starts hitting. A request that comes in right after the first one can miss.
 
 ## Stack
 
-- Rust gateway (Axum on Tokio) in front of `api.x.ai`
+- Rust gateway, Axum on Tokio, in front of api.x.ai
 - X API for trends and posts
 - No GPU. xAI hosts the inference.
 
 ## Layout
 
 ```
-clients/   X + xAI API wrappers (clients::x, clients::grok)
-gateway/   the proxy: allocator, prefix builder, injection
-bench/     Python benchmark, targets the running gateway
+clients/   X + xAI API wrappers
+gateway/   the proxy, allocator, prefix builder, injection
+bench/     Python harness, three arms against the running gateway
 ```
 
 ## Running it
@@ -66,23 +86,19 @@ cd gateway && cargo run
 
 Needs `X_BEARER_TOKEN` and `XAI_API_KEY` in `gateway/.env`.
 
-Knobs (env vars):
-
-| var | default | does |
+| env var | default | does |
 |---|---|---|
 | `TREND_COUNT` | 5 | trends fetched and held |
-| `POSTS_PER_TREND` | 8 | posts per context block (controls prefix size) |
+| `POSTS_PER_TREND` | 8 | posts per block, controls prefix size |
 | `REFRESH_INTERVAL_SECS` | 300 | background rebuild interval |
 
-Endpoints:
-
 ```
-GET  /trends                     → currently active trends
-GET  /trends/{name}              → that trend's prefix block
-POST /v1/chat/completions        → normal OpenAI-shaped chat body
-  header x-trend: <name>         → exact match against /trends; injects that
-                                    trend's prefix + pins conv-id by topic.
-                                    Omit for plain passthrough.
+GET  /trends                     active trends
+GET  /trends/{name}              that trend's context block
+POST /v1/chat/completions        OpenAI-shaped chat body
+  header x-trend: <name>         exact match, injects the block and pins
+                                 the conv-id to the topic. Omit it and the
+                                 request passes through untouched.
 ```
 
 Smoke test: `cargo run --bin run-test -- "prompt" [trend name]`
@@ -93,6 +109,5 @@ Smoke test: `cargo run --bin run-test -- "prompt" [trend name]`
 cd bench && .venv/bin/python benchmark.py --users 20 --duration 60
 ```
 
-Three arms side by side: `direct` (no context), `unshared` (context, no
-sharing), `gateway` (context, shared). Live dashboard, then a summary with
-TTFT percentiles, cached tokens, and billed cost per arm.
+Live dashboard while it runs, then token metrics, latency, and cost for each
+case, plus the gateway vs unshared comparison.
