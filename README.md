@@ -51,19 +51,14 @@ Three cases, 20 concurrent users each, 60 seconds:
 
 ## Findings
 
-Sharing the prefix does produce cache hits. In the benchmark runs the shared
-case billed less prompt cost than the unshared control, and most of the prompt
-tokens came from cache. The gap grows with the prefix size, because the extra
-tokens are exactly the ones the cache covers.
+Sharing the prefix gets cache hits. The shared case billed less prompt cost
+than the control, and most of the prompt tokens came from cache. The gap grows
+with prefix size, since the cache covers exactly those tokens.
 
-Before reading much into that, a few caveats. These are single runs against a
-live service, not a controlled study. The savings show up as a lower billed
-price on xAI's side, since xAI runs the GPUs, not as a latency or throughput
-win for the caller. Time to first token did not improve: processing a few
-thousand prompt tokens takes milliseconds inside a response that takes
-seconds, and going through the proxy adds a little on top. And the cache takes
-a moment to warm up after the first request on a topic, so a request that
-lands right after the first one can still miss.
+Caveats. Single runs against a live service, not a study. The savings are on
+xAI's side, not the caller's. Time to first token did not improve, and the
+cache needs a moment to warm up, so a request right after the first one can
+still miss.
 
 ## Stack
 
