@@ -1,3 +1,12 @@
+"""Sustained load, live dashboard: N users per arm, each looping prompts for a
+duration, direct vs. gateway side by side with bars moving as the rolling
+window updates.
+
+Usage:
+    python benchmark.py                        # 20 users, 60s
+    python benchmark.py --users 50 --duration 120
+"""
+
 import argparse
 import asyncio
 import random
@@ -5,9 +14,17 @@ import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from rich.console import Console, Group
+from rich.live import Live
+from rich.table import Table
+from rich.text import Text
+
 import requests
 
 MODEL = "grok-4"
+WINDOW_SECONDS = 15
+REFRESH_PER_SECOND = 4
+BAR_WIDTH = 24
 
 PHRASING_TEMPLATES = [
     "what's going on with this trend? (user {u}, msg {i})",
@@ -18,64 +35,91 @@ PHRASING_TEMPLATES = [
 ]
 
 
-class Case:
-    def __init__(self, name, client, build_messages=None):
+class Arm:
+    def __init__(self, name, client, style, build_messages=None):
         self.name = name
         self.client = client
+        self.style = style
         self.build_messages = build_messages or (lambda u, phrasing: [{"role": "user", "content": phrasing}])
-        self.samples = []
+        self.samples = []  # (completed_at, Sample)
+        self.inflight = 0
+        self.done = 0
         self.errors = 0
 
+    def window(self):
+        cutoff = time.monotonic() - WINDOW_SECONDS
+        return [s for t, s in self.samples if t >= cutoff]
 
-async def user_loop(case, user_id, deadline):
+    def metrics(self):
+        w = self.window()
+        ttfts = sorted(s.ttft for s in w)
+        return {
+            "req/s": len(w) / WINDOW_SECONDS,
+            "ttft p50 ms": ttfts[len(ttfts) // 2] * 1000 if ttfts else 0.0,
+            "ttft p95 ms": ttfts[int(len(ttfts) * 0.95)] * 1000 if ttfts else 0.0,
+            "cached": statistics.mean(s.cached_tokens for s in w) if w else 0.0,
+            "prompt": statistics.mean(s.prompt_tokens for s in w) if w else 0.0,
+        }
+
+
+async def _user_loop(arm, user_id, deadline):
     i = 0
     while time.monotonic() < deadline:
-        phrasing = PHRASING_TEMPLATES[(user_id + i) % len(PHRASING_TEMPLATES)].format(u=user_id, i=i)
+        phrasing = PHRASING_TEMPLATES[(user_id + i) % len(PHRASING_TEMPLATES)].format(
+            u=user_id, i=i
+        )
+        arm.inflight += 1
         try:
-            sample = await asyncio.to_thread(
-                requests.timed, case.client, MODEL, case.build_messages(user_id, phrasing)
+            s = await asyncio.to_thread(
+                requests.timed, arm.client, MODEL, arm.build_messages(user_id, phrasing)
             )
-            case.samples.append(sample)
+            arm.samples.append((time.monotonic(), s))
+            arm.done += 1
         except Exception:
-            case.errors += 1
+            arm.errors += 1
+        finally:
+            arm.inflight -= 1
         i += 1
         await asyncio.sleep(random.uniform(0.2, 1.0))
 
 
-def percentile(values, p):
-    values = sorted(values)
-    return values[min(int(len(values) * p), len(values) - 1)]
+def _bar(value, peak, style):
+    frac = 0.0 if peak <= 0 else min(value / peak, 1.0)
+    filled = round(frac * BAR_WIDTH)
+    return Text("█" * filled + "░" * (BAR_WIDTH - filled), style=style)
 
 
-def report(case, duration, baseline_cost=None):
-    s = case.samples
-    header = f" {case.name} "
-    print(f"{header:=^40}")
-    print(f"Completed requests:      {len(s)}")
-    print(f"Errors:                  {case.errors}")
-    print(f"Request rate (req/s):    {len(s) / duration:.2f}")
+def _dashboard(arms, peaks, deadline):
+    remaining = max(0.0, deadline - time.monotonic())
 
-    if s:
-        print(f"Mean TTFT (ms):          {statistics.mean(x.ttft for x in s) * 1000:.0f}")
-        print(f"Median TTFT (ms):        {percentile([x.ttft for x in s], 0.5) * 1000:.0f}")
-        print(f"P95 TTFT (ms):           {percentile([x.ttft for x in s], 0.95) * 1000:.0f}")
-        print(f"Mean prompt tokens:      {statistics.mean(x.prompt_tokens for x in s):.0f}")
-        print(f"Mean cached tokens:      {statistics.mean(x.cached_tokens for x in s):.0f}")
-        cached_share = statistics.mean(x.cached_tokens for x in s) / statistics.mean(x.prompt_tokens for x in s)
-        print(f"Cached share:            {cached_share:.0%}")
-        print(f"Mean completion tokens:  {statistics.mean(x.completion_tokens for x in s):.0f}")
-        gen_tps = statistics.mean(x.completion_tokens / max(x.total - x.ttft, 0.001) for x in s)
-        print(f"Mean gen tokens/s:       {gen_tps:.0f}")
-        mean_cost = statistics.mean(x.cost_ticks for x in s)
-        print(f"Mean cost (ticks):       {mean_cost:.0f}")
-        if baseline_cost:
-            print(f"Cost vs unshared:        {mean_cost / baseline_cost:.2f}x")
+    table = Table(title=f"{remaining:>4.0f}s left", title_justify="left")
+    table.add_column("metric")
+    for arm in arms:
+        table.add_column(arm.name, min_width=BAR_WIDTH + 10)
 
-    print("=" * 40)
-    print()
+    rows = {}
+    for arm in arms:
+        for metric, value in arm.metrics().items():
+            peaks[metric] = max(peaks.get(metric, 0.0), value)
+            rows.setdefault(metric, []).append(value)
+
+    for metric, values in rows.items():
+        cells = []
+        for arm, value in zip(arms, values):
+            cells.append(
+                Group(_bar(value, peaks[metric], arm.style), Text(f"{value:,.1f}", style="dim"))
+            )
+        table.add_row(metric, *cells)
+
+    status = Text()
+    for arm in arms:
+        status.append(f"  {arm.name}: {arm.done} done, {arm.inflight} in flight", style=arm.style)
+        if arm.errors:
+            status.append(f", {arm.errors} errors", style="red")
+    return Group(table, status)
 
 
-async def run(users, duration, trend):
+async def _run(users, duration, trend):
     asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=users * 3 + 4))
 
     prefix = requests.trend_prefix(trend)
@@ -86,35 +130,61 @@ async def run(users, duration, trend):
             {"role": "user", "content": phrasing},
         ]
 
-    cases = [
-        Case("direct", requests.direct()),
-        Case("unshared", requests.direct(), unshared_messages),
-        Case("gateway", requests.gateway(trend)),
+    arms = [
+        Arm("direct", requests.direct(), "cyan"),
+        Arm("unshared", requests.direct(), "yellow", unshared_messages),
+        Arm("gateway", requests.gateway(trend), "magenta"),
+    ]
+    deadline = time.monotonic() + duration
+    peaks = {}
+
+    loops = [
+        asyncio.ensure_future(_user_loop(arm, u, deadline)) for arm in arms for u in range(users)
     ]
 
-    deadline = time.monotonic() + duration
-    loops = [asyncio.ensure_future(user_loop(c, u, deadline)) for c in cases for u in range(users)]
-    await asyncio.gather(*loops)
+    with Live(_dashboard(arms, peaks, deadline), refresh_per_second=REFRESH_PER_SECOND) as live:
+        while not all(f.done() for f in loops):
+            live.update(_dashboard(arms, peaks, deadline))
+            await asyncio.sleep(1 / REFRESH_PER_SECOND)
+        await asyncio.gather(*loops)
+        live.update(_dashboard(arms, peaks, deadline))
 
-    return cases
+    return arms
+
+
+def _summary(console, arms, duration, users):
+    console.print()
+    for arm in arms:
+        samples = [s for _, s in arm.samples]
+        if not samples:
+            console.print(f"  [bold]{arm.name}[/]  no completed requests")
+            continue
+        ttfts = sorted(s.ttft for s in samples)
+        console.print(f"  [bold]{arm.name}[/]  ({users} users, {duration}s, {len(samples)} requests)")
+        console.print(f"    throughput       {len(samples) / duration:>8.2f} req/s")
+        console.print(f"    median ttft      {ttfts[len(ttfts) // 2] * 1000:>8.0f} ms")
+        console.print(f"    p95 ttft         {ttfts[int(len(ttfts) * 0.95)] * 1000:>8.0f} ms")
+        console.print(f"    p99 ttft         {ttfts[int(len(ttfts) * 0.99)] * 1000:>8.0f} ms")
+        console.print(f"    mean prompt      {statistics.mean(s.prompt_tokens for s in samples):>8.0f} tokens")
+        console.print(f"    mean cached      {statistics.mean(s.cached_tokens for s in samples):>8.0f} tokens")
+        console.print(f"    mean cost        {statistics.mean(s.cost_ticks for s in samples):>8.0f} ticks")
+        if arm.errors:
+            console.print(f"    errors           [red]{arm.errors}[/]")
+        console.print()
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--users", type=int, default=20, help="concurrent users per case")
+    parser.add_argument("--users", type=int, default=20, help="concurrent users per arm")
     parser.add_argument("--duration", type=int, default=60, help="seconds to run")
     args = parser.parse_args()
 
+    console = Console()
     trend = requests.trends()[0]
-    print(f"trend: {trend}  {args.users} users per case, {args.duration}s\n")
+    console.print(f"  trend: [bold]{trend}[/]\n")
 
-    cases = asyncio.run(run(args.users, args.duration, trend))
-
-    unshared = next(c for c in cases if c.name == "unshared")
-    baseline_cost = statistics.mean(s.cost_ticks for s in unshared.samples) if unshared.samples else None
-
-    for case in cases:
-        report(case, args.duration, baseline_cost if case.name != "unshared" else None)
+    arms = asyncio.run(_run(args.users, args.duration, trend))
+    _summary(console, arms, args.duration, args.users)
 
 
 if __name__ == "__main__":
