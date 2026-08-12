@@ -23,17 +23,11 @@ benchmarked it. That is the whole project.
 
 ## Stack
 
-The gateway does zero compute. It is pure I/O: every request is one upstream
-call plus a JSON splice, and the box spends its life waiting on the network.
-That drove the choices.
-
-- **tokio**: async runtime built for exactly this. Thousands of concurrent
-  in-flight requests on a handful of threads, which is what a proxy under
-  load needs. The background refresh loop is just a `tokio::spawn` with a
-  sleep, no extra thread or scheduler to manage.
-- **axum**: thin routing layer on top of tokio/hyper. Shared state through
-  extractors, handlers are plain async fns, no framework magic. I wanted a
-  proxy, not a web framework.
+- **tokio**: every request is the gateway waiting on an upstream call, so
+  async is the whole game. One thread holds many open requests at once, and
+  the refresh loop is a spawned task with a sleep instead of its own thread.
+- **axum**: routing and shared state with almost no code, and it runs on
+  tokio/hyper so inbound and outbound traffic share the one runtime.
 - **reqwest** with streaming for the upstream call, so responses stream
   straight back to the caller without buffering the whole body.
 - Benchmark in Python (openai SDK + rich live dashboard). Benchmarks are
